@@ -1,0 +1,904 @@
+import React, { useState, useEffect, useMemo } from "react";
+import {
+  Home, ShoppingCart, Package, BookText, Plus, Minus, AlertTriangle,
+  TrendingUp, Banknote, Smartphone, Phone, X, Check, ChevronRight,
+  Search, RotateCcw, Wallet, Sprout, Trash2,
+} from "lucide-react";
+
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                            */
+/* ------------------------------------------------------------------ */
+const DAY = 86400000;
+const KEY = "shambabook-v2";
+const uid = () => Math.random().toString(36).slice(2, 10);
+const ksh = (n) => "Ksh " + Math.round(n || 0).toLocaleString("en-KE");
+const fmtDate = (ts) =>
+  new Date(ts).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+const relDays = (ts) => Math.floor((Date.now() - ts) / DAY);
+const relLabel = (ts) => {
+  const d = relDays(ts);
+  if (d <= 0) return "Today";
+  if (d === 1) return "Yesterday";
+  return d + " days ago";
+};
+const sameDay = (ts) => {
+  const a = new Date(ts), b = new Date();
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+};
+function expiryInfo(expiry) {
+  if (!expiry) return { level: "none" };
+  const e = new Date(expiry + "T00:00:00").getTime();
+  const days = Math.floor((e - Date.now()) / DAY);
+  if (days < 0) return { level: "expired", days };
+  if (days <= 30) return { level: "expiring", days };
+  return { level: "ok", days };
+}
+const customerBalance = (data, id) => {
+  const owed = data.sales
+    .filter((s) => s.method === "deni" && s.customerId === id)
+    .reduce((a, s) => a + s.total, 0);
+  const paid = data.repayments.filter((r) => r.customerId === id).reduce((a, r) => a + r.amount, 0);
+  return owed - paid;
+};
+const oldestDeni = (data, id) => {
+  const ts = data.sales
+    .filter((s) => s.method === "deni" && s.customerId === id)
+    .map((s) => s.ts);
+  return ts.length ? Math.min(...ts) : Date.now();
+};
+
+/* ------------------------------------------------------------------ */
+/*  Seed data — a realistic Njoro agrovet                              */
+/* ------------------------------------------------------------------ */
+function seedData() {
+  const now = Date.now();
+  const P = (name, category, unit, stock, lowStock, costPrice, sellPrice, expiry) => ({
+    id: uid(), name, category, unit, stock, lowStock, costPrice, sellPrice, expiry: expiry || null,
+  });
+  const products = [
+    P("Kenya Seed H614 Maize 2kg", "Seeds", "pkt", 24, 5, 480, 650, "2027-03-01"),
+    P("DAP Fertilizer 50kg", "Fertilizer", "bag", 12, 3, 5800, 6500, null),
+    P("CAN Fertilizer 50kg", "Fertilizer", "bag", 8, 3, 3600, 4100, null),
+    P("NPK 17:17:17 50kg", "Fertilizer", "bag", 2, 3, 4200, 4800, null),
+    P("Roundup Herbicide 1L", "Agrochemical", "btl", 6, 4, 850, 1150, "2026-07-05"),
+    P("Duduthrin Pesticide 100ml", "Agrochemical", "btl", 3, 5, 320, 480, "2026-06-20"),
+    P("Ridomil Fungicide 250g", "Agrochemical", "sachet", 10, 4, 700, 980, "2025-12-01"),
+    P("Layers Mash 70kg", "Feed", "bag", 15, 4, 3100, 3500, null),
+    P("Knapsack Sprayer 16L", "Equipment", "pc", 5, 2, 2200, 2900, null),
+  ];
+  const byName = (n) => products.find((p) => p.name.startsWith(n));
+  const cust = [
+    { id: uid(), name: "Wanjiru Kamau", phone: "0712 345 678" },
+    { id: uid(), name: "Otieno Were", phone: "0723 456 789" },
+    { id: uid(), name: "Mwangi Farm", phone: "0701 234 567" },
+  ];
+  const line = (p, qty) => ({ productId: p.id, name: p.name, qty, price: p.sellPrice, cost: p.costPrice });
+  const sale = (ts, items, method, customerId = null) => {
+    const total = items.reduce((a, i) => a + i.qty * i.price, 0);
+    const profit = items.reduce((a, i) => a + i.qty * (i.price - i.cost), 0);
+    return { id: uid(), ts, items, total, profit, method, customerId };
+  };
+  const sales = [
+    // today
+    sale(now - 2 * 3600e3, [line(byName("Duduthrin"), 1)], "cash"),
+    sale(now - 4 * 3600e3, [line(byName("DAP"), 1), line(byName("Kenya Seed"), 2)], "mpesa"),
+    sale(now - 1 * 3600e3, [line(byName("Layers"), 2)], "deni", cust[2].id),
+    // earlier — credit owed
+    sale(now - 18 * DAY, [line(byName("DAP"), 2)], "deni", cust[0].id),
+    sale(now - 9 * DAY, [line(byName("Kenya Seed"), 4), line(byName("CAN"), 1)], "deni", cust[1].id),
+    sale(now - 3 * DAY, [line(byName("Knapsack"), 1)], "mpesa"),
+    sale(now - 5 * DAY, [line(byName("Layers"), 1)], "cash"),
+  ];
+  const repayments = [
+    { id: uid(), ts: now - 8 * DAY, customerId: cust[0].id, amount: 5000, method: "mpesa" },
+  ];
+  return { products, customers: cust, sales, repayments };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Styles                                                             */
+/* ------------------------------------------------------------------ */
+const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=Space+Grotesk:wght@500;600;700&display=swap');
+
+.sb * { box-sizing: border-box; margin: 0; padding: 0; }
+.sb {
+  --paper:#F4EFE3; --card:#FFFFFF; --ink:#211C14; --soft:#827960; --faint:#A99F88;
+  --shamba:#15663A; --shamba-deep:#0E4A29; --maize:#E0951A; --maize-soft:#FBEFD3;
+  --clay:#B23A2E; --clay-soft:#F6E2DD; --line:#E7DFCC; --line-soft:#F0EADB;
+  --green-soft:#E1EFE5;
+  font-family:'DM Sans',system-ui,sans-serif; color:var(--ink);
+  display:flex; justify-content:center; align-items:flex-start;
+  background:
+    radial-gradient(1200px 500px at 50% -10%, #FBF8F0 0%, var(--paper) 60%);
+  min-height:100%; padding:18px 12px;
+}
+.sb-app {
+  position:relative; width:100%; max-width:440px; height:min(792px, 94vh);
+  background:var(--paper); border-radius:30px; overflow:hidden;
+  display:flex; flex-direction:column;
+  border:1px solid var(--line);
+  box-shadow:0 30px 70px -30px rgba(33,28,20,.35), 0 2px 0 rgba(255,255,255,.6) inset;
+}
+
+/* header */
+.sb-top { background:var(--shamba-deep); color:#fff; padding:18px 20px 16px; flex:none;
+  background-image:linear-gradient(180deg,#0E4A29,#0B3F23); }
+.sb-top .brand { display:flex; align-items:center; gap:9px; }
+.sb-top .brand .mark { width:30px; height:30px; border-radius:9px; background:var(--maize);
+  display:grid; place-items:center; color:#3A2A06; box-shadow:0 2px 8px rgba(0,0,0,.25); }
+.sb-top h1 { font-family:'Bricolage Grotesque'; font-weight:800; font-size:19px; letter-spacing:-.3px; }
+.sb-top .shop { font-size:12px; color:#BFE0CB; margin-top:2px; }
+.sb-top .date { font-size:11px; color:#9CCBAE; }
+
+/* scroll body */
+.sb-main { flex:1; overflow-y:auto; padding:16px 16px 96px; }
+.sb-main::-webkit-scrollbar { width:0; }
+.sb-eyebrow { font-family:'DM Sans'; font-weight:700; font-size:11px; letter-spacing:.12em;
+  text-transform:uppercase; color:var(--faint); margin:18px 2px 9px; }
+.sb-eyebrow:first-child { margin-top:2px; }
+
+/* cards */
+.sb-card { background:var(--card); border:1px solid var(--line); border-radius:18px; padding:16px; }
+.sb-money { font-family:'Space Grotesk'; font-variant-numeric:tabular-nums; font-weight:600; }
+
+/* takings hero */
+.sb-hero { background:linear-gradient(155deg,#17713F 0%,#0E4A29 100%); color:#fff;
+  border:none; border-radius:22px; padding:18px 18px 16px; position:relative; overflow:hidden; }
+.sb-hero::after { content:""; position:absolute; right:-40px; top:-40px; width:150px; height:150px;
+  border-radius:50%; background:rgba(224,149,26,.18); }
+.sb-hero .lbl { font-size:12px; color:#BFE0CB; font-weight:600; }
+.sb-hero .big { font-family:'Space Grotesk'; font-weight:700; font-size:34px; letter-spacing:-1px;
+  margin:2px 0 14px; font-variant-numeric:tabular-nums; }
+.sb-split { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; position:relative; z-index:1; }
+.sb-split .cell { background:rgba(255,255,255,.10); border-radius:13px; padding:9px 10px; }
+.sb-split .cell .t { display:flex; align-items:center; gap:5px; font-size:10.5px; color:#CFE6D8; font-weight:600; }
+.sb-split .cell .v { font-family:'Space Grotesk'; font-weight:600; font-size:15px; margin-top:3px;
+  font-variant-numeric:tabular-nums; }
+
+.sb-row2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:10px; }
+.sb-mini { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:13px 14px; }
+.sb-mini .k { font-size:11.5px; color:var(--soft); font-weight:600; display:flex; align-items:center; gap:5px; }
+.sb-mini .v { font-family:'Space Grotesk'; font-weight:600; font-size:20px; margin-top:4px;
+  letter-spacing:-.5px; font-variant-numeric:tabular-nums; }
+
+/* alert rows */
+.sb-alert { display:flex; align-items:center; gap:12px; padding:13px 14px; border-radius:15px;
+  border:1px solid var(--line); background:var(--card); margin-bottom:9px; }
+.sb-alert .ic { width:34px; height:34px; border-radius:10px; display:grid; place-items:center; flex:none; }
+.sb-alert.danger .ic { background:var(--clay-soft); color:var(--clay); }
+.sb-alert.warn .ic { background:var(--maize-soft); color:var(--maize); }
+.sb-alert .txt { flex:1; }
+.sb-alert .txt .a { font-weight:700; font-size:13.5px; }
+.sb-alert .txt .b { font-size:12px; color:var(--soft); margin-top:1px; }
+.sb-alert .amt { font-family:'Space Grotesk'; font-weight:700; font-variant-numeric:tabular-nums; }
+.sb-alert.danger .amt { color:var(--clay); }
+
+/* badges */
+.sb-badge { display:inline-flex; align-items:center; gap:4px; font-size:10.5px; font-weight:700;
+  padding:3px 8px; border-radius:999px; letter-spacing:.02em; }
+.sb-badge.ok { background:var(--green-soft); color:var(--shamba); }
+.sb-badge.warn { background:var(--maize-soft); color:#9A6608; }
+.sb-badge.danger { background:var(--clay-soft); color:var(--clay); }
+.sb-badge.cat { background:#F1ECDF; color:var(--soft); }
+
+/* product / list rows */
+.sb-item { background:var(--card); border:1px solid var(--line); border-radius:15px; padding:12px 13px;
+  margin-bottom:9px; }
+.sb-item .top { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+.sb-item .nm { font-weight:700; font-size:14px; line-height:1.25; }
+.sb-item .meta { display:flex; gap:7px; flex-wrap:wrap; align-items:center; margin-top:7px; }
+.sb-item .price { font-family:'Space Grotesk'; font-weight:600; font-variant-numeric:tabular-nums;
+  white-space:nowrap; }
+
+/* steppers + buttons */
+.sb-step { display:inline-flex; align-items:center; gap:0; border:1px solid var(--line);
+  border-radius:11px; overflow:hidden; }
+.sb-step button { width:32px; height:32px; border:none; background:var(--line-soft); color:var(--ink);
+  cursor:pointer; display:grid; place-items:center; }
+.sb-step button:disabled { opacity:.4; cursor:not-allowed; }
+.sb-step .q { min-width:30px; text-align:center; font-family:'Space Grotesk'; font-weight:600; }
+.sb-add { border:none; background:var(--shamba); color:#fff; border-radius:11px; height:34px;
+  padding:0 14px; font-weight:700; font-size:13px; cursor:pointer; display:inline-flex;
+  align-items:center; gap:6px; font-family:'DM Sans'; }
+.sb-add:disabled { background:#C9C2B0; cursor:not-allowed; }
+
+.sb-btn { width:100%; border:none; border-radius:14px; height:50px; font-family:'DM Sans';
+  font-weight:700; font-size:15px; cursor:pointer; display:flex; align-items:center;
+  justify-content:center; gap:8px; }
+.sb-btn.primary { background:var(--shamba); color:#fff; box-shadow:0 8px 20px -8px rgba(21,102,58,.6); }
+.sb-btn.primary:disabled { background:#C9C2B0; box-shadow:none; cursor:not-allowed; }
+.sb-btn.ghost { background:transparent; border:1px solid var(--line); color:var(--ink); height:46px; }
+.sb-btn.maize { background:var(--maize); color:#3A2A06; }
+
+/* bottom nav */
+.sb-nav { position:absolute; left:0; right:0; bottom:0; height:72px; display:flex;
+  background:rgba(255,255,255,.92); backdrop-filter:blur(8px); border-top:1px solid var(--line);
+  padding-bottom:env(safe-area-inset-bottom); }
+.sb-nav button { flex:1; border:none; background:none; cursor:pointer; display:flex;
+  flex-direction:column; align-items:center; justify-content:center; gap:4px; color:var(--faint);
+  font-family:'DM Sans'; font-size:11px; font-weight:600; }
+.sb-nav button.on { color:var(--shamba); }
+.sb-nav button .dot { width:5px; height:5px; border-radius:50%; background:transparent; }
+.sb-nav button.on .dot { background:var(--maize); }
+
+/* search */
+.sb-search { display:flex; align-items:center; gap:8px; background:var(--card); border:1px solid var(--line);
+  border-radius:13px; padding:10px 13px; margin-bottom:12px; }
+.sb-search input { border:none; outline:none; flex:1; font-family:'DM Sans'; font-size:14px;
+  background:transparent; color:var(--ink); }
+
+/* cart bar */
+.sb-cartbar { position:absolute; left:12px; right:12px; bottom:84px; background:var(--shamba-deep);
+  color:#fff; border-radius:16px; padding:11px 14px; display:flex; align-items:center;
+  justify-content:space-between; box-shadow:0 14px 30px -12px rgba(11,63,35,.7); }
+.sb-cartbar .c1 { font-size:12px; color:#BFE0CB; }
+.sb-cartbar .c2 { font-family:'Space Grotesk'; font-weight:700; font-size:18px; }
+.sb-cartbar button { border:none; background:var(--maize); color:#3A2A06; font-weight:700;
+  border-radius:11px; padding:9px 16px; cursor:pointer; font-family:'DM Sans'; }
+
+/* overlays / sheets */
+.sb-scrim { position:absolute; inset:0; background:rgba(20,16,10,.42); display:flex;
+  align-items:flex-end; z-index:30; }
+.sb-sheet { width:100%; background:var(--paper); border-radius:24px 24px 0 0; padding:18px 18px 22px;
+  max-height:88%; overflow-y:auto; }
+.sb-sheet::-webkit-scrollbar { width:0; }
+.sb-sheet h3 { font-family:'Bricolage Grotesque'; font-weight:800; font-size:18px; letter-spacing:-.3px; }
+.sb-sheet .sub { font-size:12.5px; color:var(--soft); margin-top:2px; }
+.sb-sheet .head { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:14px; }
+.sb-x { border:none; background:var(--line-soft); width:32px; height:32px; border-radius:50%;
+  cursor:pointer; display:grid; place-items:center; color:var(--soft); }
+
+/* form */
+.sb-field { margin-bottom:11px; }
+.sb-field label { display:block; font-size:11.5px; font-weight:700; color:var(--soft); margin-bottom:5px;
+  letter-spacing:.02em; }
+.sb-input { width:100%; border:1px solid var(--line); border-radius:12px; padding:11px 12px;
+  font-family:'DM Sans'; font-size:14px; outline:none; background:var(--card); color:var(--ink); }
+.sb-input:focus { border-color:var(--shamba); }
+.sb-two { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+
+/* pay options */
+.sb-pay { display:grid; grid-template-columns:repeat(3,1fr); gap:9px; margin:6px 0 14px; }
+.sb-pay button { border:1px solid var(--line); background:var(--card); border-radius:14px; padding:13px 6px;
+  cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:6px; font-family:'DM Sans';
+  font-weight:700; font-size:12.5px; color:var(--soft); }
+.sb-pay button.on { border-color:var(--shamba); background:var(--green-soft); color:var(--shamba); }
+
+/* deni customer pick */
+.sb-pick { display:flex; align-items:center; justify-content:space-between; padding:11px 12px;
+  border:1px solid var(--line); border-radius:12px; margin-bottom:8px; background:var(--card); cursor:pointer; }
+.sb-pick.on { border-color:var(--shamba); background:var(--green-soft); }
+
+/* ledger / txn lines */
+.sb-led { display:flex; align-items:center; justify-content:space-between; padding:11px 2px;
+  border-bottom:1px dashed var(--line); }
+.sb-led:last-child { border-bottom:none; }
+.sb-led .l1 { font-weight:600; font-size:13.5px; }
+.sb-led .l2 { font-size:11.5px; color:var(--soft); margin-top:1px; }
+.sb-led .v { font-family:'Space Grotesk'; font-weight:700; font-variant-numeric:tabular-nums; }
+.sb-led .v.debit { color:var(--clay); }
+.sb-led .v.credit { color:var(--shamba); }
+
+/* toast */
+.sb-toast { position:absolute; left:50%; transform:translateX(-50%); bottom:96px; z-index:50;
+  background:var(--ink); color:#fff; padding:11px 18px; border-radius:999px; font-weight:600;
+  font-size:13px; display:flex; align-items:center; gap:8px; box-shadow:0 12px 30px -10px rgba(0,0,0,.5);
+  animation:sbpop .2s ease; }
+@keyframes sbpop { from { opacity:0; transform:translate(-50%,8px); } }
+
+.sb-empty { text-align:center; color:var(--soft); padding:40px 20px; }
+.sb-empty .ic { width:54px; height:54px; border-radius:16px; background:var(--line-soft);
+  display:grid; place-items:center; margin:0 auto 12px; color:var(--faint); }
+.sb-empty .a { font-weight:700; color:var(--ink); }
+.sb-empty .b { font-size:13px; margin-top:4px; }
+
+.sb-link { background:none; border:none; color:var(--shamba); font-weight:700; font-size:12.5px;
+  cursor:pointer; font-family:'DM Sans'; display:inline-flex; align-items:center; gap:4px; }
+.sb-load { display:grid; place-items:center; height:100%; color:var(--soft); gap:12px; }
+@media (prefers-reduced-motion: reduce){ .sb-toast{ animation:none; } }
+`;
+
+/* ------------------------------------------------------------------ */
+/*  Small presentational bits                                          */
+/* ------------------------------------------------------------------ */
+const PayIcon = ({ m, size = 18 }) =>
+  m === "cash" ? <Banknote size={size} /> : m === "mpesa" ? <Smartphone size={size} /> : <BookText size={size} />;
+const payLabel = { cash: "Cash", mpesa: "M-Pesa", deni: "Deni" };
+
+function StockBadges({ p }) {
+  const ex = expiryInfo(p.expiry);
+  const out = p.stock <= 0;
+  const low = !out && p.stock <= p.lowStock;
+  return (
+    <>
+      {out && <span className="sb-badge danger">Out of stock</span>}
+      {low && <span className="sb-badge warn">Low · {p.stock} left</span>}
+      {!out && !low && <span className="sb-badge ok">{p.stock} {p.unit} in stock</span>}
+      {ex.level === "expired" && <span className="sb-badge danger"><AlertTriangle size={11} /> Expired</span>}
+      {ex.level === "expiring" && <span className="sb-badge warn">Expires in {ex.days}d</span>}
+    </>
+  );
+}
+
+/* ================================================================== */
+/*  App                                                                */
+/* ================================================================== */
+export default function App() {
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState(null);
+  const [tab, setTab] = useState("home");
+  const [toast, setToast] = useState(null);
+
+  // sell
+  const [query, setQuery] = useState("");
+  const [cart, setCart] = useState({});
+  const [paySheet, setPaySheet] = useState(false);
+  const [payMethod, setPayMethod] = useState("cash");
+  const [deniCustId, setDeniCustId] = useState(null);
+  const [newCust, setNewCust] = useState({ name: "", phone: "" });
+
+  // stock
+  const [addOpen, setAddOpen] = useState(false);
+  const [form, setForm] = useState(null);
+  const [restock, setRestock] = useState(null);
+
+  // deni
+  const [deniDetail, setDeniDetail] = useState(null);
+  const [repayAmt, setRepayAmt] = useState("");
+  const [repayMethod, setRepayMethod] = useState("mpesa");
+
+  /* load / persist ------------------------------------------------- */
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        if (window.storage) {
+          const res = await window.storage.get(KEY);
+          if (active && res && res.value) {
+            setData(JSON.parse(res.value));
+            setLoading(false);
+            return;
+          }
+        }
+      } catch (e) { /* fall through to seed */ }
+      const seeded = seedData();
+      if (active) { setData(seeded); setLoading(false); }
+      try { await window.storage?.set(KEY, JSON.stringify(seeded), false); } catch (e) {}
+    })();
+    return () => { active = false; };
+  }, []);
+
+  const persist = (next) => {
+    setData(next);
+    try { window.storage?.set(KEY, JSON.stringify(next), false)?.catch?.(() => {}); } catch (e) {}
+  };
+  const flash = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2400); };
+
+  /* derived -------------------------------------------------------- */
+  const m = useMemo(() => {
+    if (!data) return null;
+    const today = data.sales.filter((s) => sameDay(s.ts));
+    const sum = (arr, f) => arr.reduce((a, s) => a + f(s), 0);
+    const cash = sum(today.filter((s) => s.method === "cash"), (s) => s.total);
+    const mpesa = sum(today.filter((s) => s.method === "mpesa"), (s) => s.total);
+    const deni = sum(today.filter((s) => s.method === "deni"), (s) => s.total);
+    const profit = sum(today, (s) => s.profit);
+
+    const totalDeni = data.customers.reduce((a, c) => a + Math.max(0, customerBalance(data, c.id)), 0);
+    const overdue = data.customers
+      .map((c) => ({ c, bal: customerBalance(data, c.id), age: relDays(oldestDeni(data, c.id)) }))
+      .filter((x) => x.bal > 0 && x.age > 14);
+    const overdueAmt = overdue.reduce((a, x) => a + x.bal, 0);
+
+    const expProblem = data.products.filter((p) => ["expired", "expiring"].includes(expiryInfo(p.expiry).level));
+    const lowStock = data.products.filter((p) => p.stock <= p.lowStock);
+    const stockValue = data.products.reduce((a, p) => a + p.stock * p.costPrice, 0);
+
+    return { today, cash, mpesa, deni, profit, totalDeni, overdue, overdueAmt, expProblem, lowStock, stockValue };
+  }, [data]);
+
+  if (loading || !data) {
+    return (
+      <div className="sb"><style>{CSS}</style>
+        <div className="sb-app"><div className="sb-load">
+          <Sprout size={30} color="#15663A" />
+          <div style={{ fontWeight: 600 }}>Opening your books…</div>
+        </div></div>
+      </div>
+    );
+  }
+
+  /* sell actions --------------------------------------------------- */
+  const cartLines = Object.entries(cart)
+    .map(([id, qty]) => ({ p: data.products.find((x) => x.id === id), qty }))
+    .filter((x) => x.p && x.qty > 0);
+  const cartTotal = cartLines.reduce((a, l) => a + l.qty * l.p.sellPrice, 0);
+  const cartCount = cartLines.reduce((a, l) => a + l.qty, 0);
+
+  const setQty = (p, q) => {
+    const max = p.stock;
+    const next = Math.max(0, Math.min(max, q));
+    setCart((c) => ({ ...c, [p.id]: next }));
+  };
+
+  const recordSale = () => {
+    let customerId = null;
+    let customers = data.customers;
+    if (payMethod === "deni") {
+      if (deniCustId) customerId = deniCustId;
+      else if (newCust.name.trim()) {
+        customerId = uid();
+        customers = [...customers, { id: customerId, name: newCust.name.trim(), phone: newCust.phone.trim() }];
+      } else { flash("Pick or add a customer for deni"); return; }
+    }
+    const items = cartLines.map((l) => ({
+      productId: l.p.id, name: l.p.name, qty: l.qty, price: l.p.sellPrice, cost: l.p.costPrice,
+    }));
+    const total = items.reduce((a, i) => a + i.qty * i.price, 0);
+    const profit = items.reduce((a, i) => a + i.qty * (i.price - i.cost), 0);
+    const products = data.products.map((p) => {
+      const l = cartLines.find((x) => x.p.id === p.id);
+      return l ? { ...p, stock: p.stock - l.qty } : p;
+    });
+    const sale = { id: uid(), ts: Date.now(), items, total, profit, method: payMethod, customerId };
+    persist({ ...data, products, customers, sales: [sale, ...data.sales] });
+    setCart({}); setPaySheet(false); setDeniCustId(null); setNewCust({ name: "", phone: "" }); setPayMethod("cash");
+    flash(`Sale recorded · ${ksh(total)}`);
+    setTab("home");
+  };
+
+  /* stock actions -------------------------------------------------- */
+  const blankForm = () => ({
+    name: "", category: "Seeds", unit: "pkt", stock: "", lowStock: "", costPrice: "", sellPrice: "", expiry: "",
+  });
+  const saveProduct = () => {
+    const f = form;
+    if (!f.name.trim() || !f.sellPrice) { flash("Add a name and selling price"); return; }
+    const np = {
+      id: uid(), name: f.name.trim(), category: f.category, unit: f.unit || "pc",
+      stock: Number(f.stock) || 0, lowStock: Number(f.lowStock) || 0,
+      costPrice: Number(f.costPrice) || 0, sellPrice: Number(f.sellPrice) || 0,
+      expiry: f.expiry || null,
+    };
+    persist({ ...data, products: [np, ...data.products] });
+    setAddOpen(false); setForm(null); flash("Product added");
+  };
+  const doRestock = () => {
+    const add = Number(restock.qty) || 0;
+    if (add <= 0) { setRestock(null); return; }
+    const products = data.products.map((p) => p.id === restock.id ? { ...p, stock: p.stock + add } : p);
+    persist({ ...data, products });
+    flash(`Restocked +${add}`); setRestock(null);
+  };
+
+  /* deni actions --------------------------------------------------- */
+  const recordRepayment = () => {
+    const amt = Number(repayAmt) || 0;
+    if (amt <= 0) { flash("Enter an amount"); return; }
+    const r = { id: uid(), ts: Date.now(), customerId: deniDetail.id, amount: amt, method: repayMethod };
+    persist({ ...data, repayments: [r, ...data.repayments] });
+    setRepayAmt(""); flash(`Payment recorded · ${ksh(amt)}`);
+  };
+
+  const resetDemo = () => { const s = seedData(); persist(s); flash("Demo data reset"); };
+
+  /* ---------------------------------------------------------------- */
+  /*  Screens                                                          */
+  /* ---------------------------------------------------------------- */
+  const Home = () => (
+    <>
+      <div className="sb-hero">
+        <div className="lbl">Leo · Today's takings</div>
+        <div className="big">{ksh(m.cash + m.mpesa + m.deni)}</div>
+        <div className="sb-split">
+          <div className="cell"><div className="t"><Banknote size={12} /> Cash</div><div className="v">{ksh(m.cash)}</div></div>
+          <div className="cell"><div className="t"><Smartphone size={12} /> M-Pesa</div><div className="v">{ksh(m.mpesa)}</div></div>
+          <div className="cell"><div className="t"><BookText size={12} /> Deni</div><div className="v">{ksh(m.deni)}</div></div>
+        </div>
+      </div>
+
+      <div className="sb-row2">
+        <div className="sb-mini"><div className="k"><TrendingUp size={13} /> Profit today</div>
+          <div className="v" style={{ color: "var(--shamba)" }}>{ksh(m.profit)}</div></div>
+        <div className="sb-mini"><div className="k"><Wallet size={13} /> Deni owed to you</div>
+          <div className="v" style={{ color: m.totalDeni > 0 ? "var(--clay)" : "var(--ink)" }}>{ksh(m.totalDeni)}</div></div>
+      </div>
+
+      <div className="sb-eyebrow">Needs attention</div>
+      {m.overdue.length === 0 && m.expProblem.length === 0 && m.lowStock.length === 0 ? (
+        <div className="sb-card" style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <Check size={18} color="#15663A" /><span style={{ fontWeight: 600 }}>All clear. Nothing overdue or expiring.</span>
+        </div>
+      ) : (
+        <>
+          {m.overdue.length > 0 && (
+            <div className="sb-alert danger" onClick={() => setTab("deni")} style={{ cursor: "pointer" }}>
+              <div className="ic"><AlertTriangle size={18} /></div>
+              <div className="txt"><div className="a">{m.overdue.length} overdue debt{m.overdue.length > 1 ? "s" : ""}</div>
+                <div className="b">Older than 14 days · tap to chase</div></div>
+              <div className="amt">{ksh(m.overdueAmt)}</div>
+            </div>
+          )}
+          {m.expProblem.length > 0 && (
+            <div className="sb-alert danger" onClick={() => setTab("stock")} style={{ cursor: "pointer" }}>
+              <div className="ic"><AlertTriangle size={18} /></div>
+              <div className="txt"><div className="a">{m.expProblem.length} product{m.expProblem.length > 1 ? "s" : ""} expiring or expired</div>
+                <div className="b">Pull or discount before selling</div></div>
+              <ChevronRight size={18} color="#A99F88" />
+            </div>
+          )}
+          {m.lowStock.length > 0 && (
+            <div className="sb-alert warn" onClick={() => setTab("stock")} style={{ cursor: "pointer" }}>
+              <div className="ic"><Package size={18} /></div>
+              <div className="txt"><div className="a">{m.lowStock.length} item{m.lowStock.length > 1 ? "s" : ""} low on stock</div>
+                <div className="b">Reorder from your supplier soon</div></div>
+              <ChevronRight size={18} color="#A99F88" />
+            </div>
+          )}
+        </>
+      )}
+
+      <div className="sb-eyebrow">Recent sales</div>
+      {data.sales.slice(0, 6).map((s) => {
+        const cust = s.customerId && data.customers.find((c) => c.id === s.customerId);
+        return (
+          <div className="sb-item" key={s.id}>
+            <div className="top">
+              <div>
+                <div className="nm">{s.items.map((i) => `${i.qty}× ${i.name.split(" ").slice(0, 2).join(" ")}`).join(", ")}</div>
+                <div className="meta">
+                  <span className="sb-badge cat"><PayIcon m={s.method} size={11} /> {payLabel[s.method]}{cust ? ` · ${cust.name}` : ""}</span>
+                  <span style={{ fontSize: 11.5, color: "var(--faint)" }}>{relLabel(s.ts)}</span>
+                </div>
+              </div>
+              <div className="price">{ksh(s.total)}</div>
+            </div>
+          </div>
+        );
+      })}
+
+      <button className="sb-link" style={{ marginTop: 10 }} onClick={resetDemo}>
+        <RotateCcw size={13} /> Reset demo data
+      </button>
+    </>
+  );
+
+  const Sell = () => {
+    const list = data.products.filter((p) => p.name.toLowerCase().includes(query.toLowerCase()));
+    return (
+      <>
+        <div className="sb-search">
+          <Search size={17} color="#A99F88" />
+          <input placeholder="Search seeds, fertilizer, chemicals…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        </div>
+        {list.map((p) => {
+          const ex = expiryInfo(p.expiry);
+          const expired = ex.level === "expired";
+          const out = p.stock <= 0;
+          const q = cart[p.id] || 0;
+          return (
+            <div className="sb-item" key={p.id} style={expired || out ? { opacity: .7 } : null}>
+              <div className="top">
+                <div style={{ flex: 1 }}>
+                  <div className="nm">{p.name}</div>
+                  <div className="meta"><StockBadges p={p} /></div>
+                </div>
+                <div className="price">{ksh(p.sellPrice)}</div>
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
+                {expired ? (
+                  <span className="sb-badge danger">Expired — cannot sell</span>
+                ) : out ? (
+                  <span className="sb-badge danger">Out of stock</span>
+                ) : q > 0 ? (
+                  <div className="sb-step">
+                    <button onClick={() => setQty(p, q - 1)}><Minus size={15} /></button>
+                    <span className="q">{q}</span>
+                    <button onClick={() => setQty(p, q + 1)} disabled={q >= p.stock}><Plus size={15} /></button>
+                  </div>
+                ) : (
+                  <button className="sb-add" onClick={() => setQty(p, 1)}><Plus size={15} /> Add</button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+        {cartCount > 0 && (
+          <div className="sb-cartbar">
+            <div><div className="c1">{cartCount} item{cartCount > 1 ? "s" : ""}</div><div className="c2">{ksh(cartTotal)}</div></div>
+            <button onClick={() => setPaySheet(true)}>Record sale</button>
+          </div>
+        )}
+      </>
+    );
+  };
+
+  const Stock = () => {
+    const sorted = [...data.products].sort((a, b) => {
+      const score = (p) => {
+        const ex = expiryInfo(p.expiry).level;
+        if (ex === "expired" || p.stock <= 0) return 0;
+        if (ex === "expiring" || p.stock <= p.lowStock) return 1;
+        return 2;
+      };
+      return score(a) - score(b);
+    });
+    return (
+      <>
+        <div className="sb-mini" style={{ marginBottom: 14 }}>
+          <div className="k"><Package size={13} /> Stock value at cost</div>
+          <div className="v">{ksh(m.stockValue)}</div>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <div className="sb-eyebrow" style={{ margin: 0 }}>Inventory · {data.products.length} items</div>
+          <button className="sb-add" style={{ height: 32 }} onClick={() => { setForm(blankForm()); setAddOpen(true); }}>
+            <Plus size={15} /> Add
+          </button>
+        </div>
+        <div style={{ height: 10 }} />
+        {sorted.map((p) => (
+          <div className="sb-item" key={p.id}>
+            <div className="top">
+              <div style={{ flex: 1 }}>
+                <div className="nm">{p.name}</div>
+                <div className="meta">
+                  <span className="sb-badge cat">{p.category}</span>
+                  <StockBadges p={p} />
+                  {p.expiry && <span style={{ fontSize: 11, color: "var(--faint)" }}>Exp {fmtDate(new Date(p.expiry + "T00:00:00").getTime())}</span>}
+                </div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div className="price">{ksh(p.sellPrice)}</div>
+                <div style={{ fontSize: 11, color: "var(--faint)" }}>cost {ksh(p.costPrice)}</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 9 }}>
+              <button className="sb-link" onClick={() => setRestock({ id: p.id, name: p.name, qty: "" })}>
+                <Plus size={13} /> Restock
+              </button>
+            </div>
+          </div>
+        ))}
+      </>
+    );
+  };
+
+  const Deni = () => {
+    const rows = data.customers
+      .map((c) => ({ c, bal: customerBalance(data, c.id), age: relDays(oldestDeni(data, c.id)) }))
+      .filter((x) => x.bal > 0)
+      .sort((a, b) => b.age - a.age);
+    return (
+      <>
+        <div className="sb-hero" style={{ background: "linear-gradient(155deg,#B23A2E,#8C2A20)" }}>
+          <div className="lbl" style={{ color: "#F3CFC9" }}>Deni book · total owed to you</div>
+          <div className="big">{ksh(m.totalDeni)}</div>
+          <div style={{ fontSize: 12, color: "#F3CFC9", position: "relative", zIndex: 1 }}>
+            {rows.length} customer{rows.length !== 1 ? "s" : ""} on credit
+          </div>
+        </div>
+        <div className="sb-eyebrow">Who owes you</div>
+        {rows.length === 0 ? (
+          <div className="sb-empty"><div className="ic"><BookText size={24} /></div>
+            <div className="a">No debts outstanding</div><div className="b">Credit sales will appear here.</div></div>
+        ) : rows.map(({ c, bal, age }) => {
+          const overdue = age > 14, watch = age > 7 && age <= 14;
+          return (
+            <div className="sb-item" key={c.id} onClick={() => { setDeniDetail(c); setRepayAmt(""); }} style={{ cursor: "pointer" }}>
+              <div className="top">
+                <div>
+                  <div className="nm">{c.name}</div>
+                  <div className="meta">
+                    <span style={{ fontSize: 12, color: "var(--soft)", display: "flex", alignItems: "center", gap: 4 }}>
+                      <Phone size={11} /> {c.phone || "—"}</span>
+                    {overdue && <span className="sb-badge danger">{age}d · overdue</span>}
+                    {watch && <span className="sb-badge warn">{age}d</span>}
+                    {!overdue && !watch && <span className="sb-badge ok">{age}d</span>}
+                  </div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div className="price" style={{ color: overdue ? "var(--clay)" : "var(--ink)", fontSize: 16 }}>{ksh(bal)}</div>
+                  <ChevronRight size={16} color="#A99F88" style={{ marginTop: 2 }} />
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </>
+    );
+  };
+
+  /* ---------------------------------------------------------------- */
+  const screens = { home: <Home />, sell: <Sell />, stock: <Stock />, deni: <Deni /> };
+  const titles = { home: "Njoro Agrovet", sell: "New sale", stock: "Stock", deni: "Deni book" };
+
+  return (
+    <div className="sb"><style>{CSS}</style>
+      <div className="sb-app">
+        {/* header */}
+        <div className="sb-top">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div className="brand">
+              <div className="mark"><Sprout size={18} /></div>
+              <div>
+                <h1>{tab === "home" ? "ShambaBook" : titles[tab]}</h1>
+                <div className="shop">{tab === "home" ? "Njoro Agrovet & Supplies" : "ShambaBook"}</div>
+              </div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div className="date">{new Date().toLocaleDateString("en-GB", { weekday: "short" })}</div>
+              <div className="date" style={{ color: "#BFE0CB", fontWeight: 600 }}>{fmtDate(Date.now())}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* body */}
+        <div className="sb-main">{screens[tab]}</div>
+
+        {/* toast */}
+        {toast && <div className="sb-toast"><Check size={15} /> {toast}</div>}
+
+        {/* bottom nav */}
+        <div className="sb-nav">
+          {[["home", Home, "Home"], ["sell", ShoppingCart, "Sell"], ["stock", Package, "Stock"], ["deni", BookText, "Deni"]]
+            .map(([key, , label], i) => {
+              const Icon = [Home, ShoppingCart, Package, BookText][i];
+              return (
+                <button key={key} className={tab === key ? "on" : ""} onClick={() => setTab(key)}>
+                  <span className="dot" /><Icon size={21} />{label}
+                </button>
+              );
+            })}
+        </div>
+
+        {/* ---- payment sheet ---- */}
+        {paySheet && (
+          <div className="sb-scrim" onClick={() => setPaySheet(false)}>
+            <div className="sb-sheet" onClick={(e) => e.stopPropagation()}>
+              <div className="head">
+                <div><h3>How was it paid?</h3><div className="sub">{cartCount} items · {ksh(cartTotal)}</div></div>
+                <button className="sb-x" onClick={() => setPaySheet(false)}><X size={17} /></button>
+              </div>
+              <div className="sb-pay">
+                {["cash", "mpesa", "deni"].map((mth) => (
+                  <button key={mth} className={payMethod === mth ? "on" : ""} onClick={() => setPayMethod(mth)}>
+                    <PayIcon m={mth} /> {payLabel[mth]}
+                  </button>
+                ))}
+              </div>
+
+              {payMethod === "deni" && (
+                <>
+                  <div className="sb-eyebrow" style={{ marginTop: 4 }}>Customer on credit</div>
+                  {data.customers.map((c) => (
+                    <div key={c.id} className={"sb-pick" + (deniCustId === c.id ? " on" : "")}
+                      onClick={() => { setDeniCustId(c.id); setNewCust({ name: "", phone: "" }); }}>
+                      <div><div style={{ fontWeight: 700, fontSize: 13.5 }}>{c.name}</div>
+                        <div style={{ fontSize: 12, color: "var(--soft)" }}>{c.phone} · owes {ksh(Math.max(0, customerBalance(data, c.id)))}</div></div>
+                      {deniCustId === c.id && <Check size={17} color="#15663A" />}
+                    </div>
+                  ))}
+                  <div className="sb-eyebrow">Or add a new customer</div>
+                  <div className="sb-two">
+                    <input className="sb-input" placeholder="Name" value={newCust.name}
+                      onChange={(e) => { setNewCust({ ...newCust, name: e.target.value }); setDeniCustId(null); }} />
+                    <input className="sb-input" placeholder="Phone" value={newCust.phone}
+                      onChange={(e) => setNewCust({ ...newCust, phone: e.target.value })} />
+                  </div>
+                  <div style={{ height: 12 }} />
+                </>
+              )}
+
+              <button className="sb-btn primary" onClick={recordSale}>
+                <Check size={18} /> Confirm {ksh(cartTotal)} {payMethod === "deni" ? "on deni" : payLabel[payMethod]}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ---- add product sheet ---- */}
+        {addOpen && form && (
+          <div className="sb-scrim" onClick={() => setAddOpen(false)}>
+            <div className="sb-sheet" onClick={(e) => e.stopPropagation()}>
+              <div className="head"><div><h3>Add product</h3><div className="sub">New line in your stock</div></div>
+                <button className="sb-x" onClick={() => setAddOpen(false)}><X size={17} /></button></div>
+              <div className="sb-field"><label>Product name</label>
+                <input className="sb-input" placeholder="e.g. Yara Mila Cereal 50kg" value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
+              <div className="sb-two">
+                <div className="sb-field"><label>Category</label>
+                  <select className="sb-input" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
+                    {["Seeds", "Fertilizer", "Agrochemical", "Feed", "Equipment", "Veterinary"].map((c) => <option key={c}>{c}</option>)}
+                  </select></div>
+                <div className="sb-field"><label>Unit</label>
+                  <input className="sb-input" placeholder="bag / pkt / btl" value={form.unit}
+                    onChange={(e) => setForm({ ...form, unit: e.target.value })} /></div>
+              </div>
+              <div className="sb-two">
+                <div className="sb-field"><label>Cost price (Ksh)</label>
+                  <input className="sb-input" inputMode="numeric" value={form.costPrice}
+                    onChange={(e) => setForm({ ...form, costPrice: e.target.value })} /></div>
+                <div className="sb-field"><label>Selling price (Ksh)</label>
+                  <input className="sb-input" inputMode="numeric" value={form.sellPrice}
+                    onChange={(e) => setForm({ ...form, sellPrice: e.target.value })} /></div>
+              </div>
+              <div className="sb-two">
+                <div className="sb-field"><label>Quantity in stock</label>
+                  <input className="sb-input" inputMode="numeric" value={form.stock}
+                    onChange={(e) => setForm({ ...form, stock: e.target.value })} /></div>
+                <div className="sb-field"><label>Warn when below</label>
+                  <input className="sb-input" inputMode="numeric" value={form.lowStock}
+                    onChange={(e) => setForm({ ...form, lowStock: e.target.value })} /></div>
+              </div>
+              <div className="sb-field"><label>Expiry date (chemicals & feed)</label>
+                <input className="sb-input" type="date" value={form.expiry}
+                  onChange={(e) => setForm({ ...form, expiry: e.target.value })} /></div>
+              <button className="sb-btn primary" onClick={saveProduct}><Plus size={18} /> Save product</button>
+            </div>
+          </div>
+        )}
+
+        {/* ---- restock sheet ---- */}
+        {restock && (
+          <div className="sb-scrim" onClick={() => setRestock(null)}>
+            <div className="sb-sheet" onClick={(e) => e.stopPropagation()}>
+              <div className="head"><div><h3>Restock</h3><div className="sub">{restock.name}</div></div>
+                <button className="sb-x" onClick={() => setRestock(null)}><X size={17} /></button></div>
+              <div className="sb-field"><label>Quantity received</label>
+                <input className="sb-input" inputMode="numeric" autoFocus placeholder="0"
+                  value={restock.qty} onChange={(e) => setRestock({ ...restock, qty: e.target.value })} /></div>
+              <button className="sb-btn primary" onClick={doRestock}><Check size={18} /> Add to stock</button>
+            </div>
+          </div>
+        )}
+
+        {/* ---- deni detail sheet ---- */}
+        {deniDetail && (
+          <div className="sb-scrim" onClick={() => setDeniDetail(null)}>
+            <div className="sb-sheet" onClick={(e) => e.stopPropagation()}>
+              <div className="head">
+                <div><h3>{deniDetail.name}</h3>
+                  <div className="sub"><Phone size={11} style={{ display: "inline", marginRight: 4 }} />{deniDetail.phone || "—"}</div></div>
+                <button className="sb-x" onClick={() => setDeniDetail(null)}><X size={17} /></button>
+              </div>
+              <div className="sb-card" style={{ background: "var(--clay-soft)", border: "none", marginBottom: 14 }}>
+                <div style={{ fontSize: 12, color: "#8C2A20", fontWeight: 600 }}>Current balance</div>
+                <div className="sb-money" style={{ fontSize: 28, color: "var(--clay)", marginTop: 2 }}>
+                  {ksh(Math.max(0, customerBalance(data, deniDetail.id)))}</div>
+              </div>
+
+              <div className="sb-eyebrow" style={{ marginTop: 0 }}>Ledger</div>
+              <div className="sb-card" style={{ padding: "4px 14px", marginBottom: 14 }}>
+                {[
+                  ...data.sales.filter((s) => s.method === "deni" && s.customerId === deniDetail.id)
+                    .map((s) => ({ ts: s.ts, type: "debit", amount: s.total, label: s.items.map((i) => `${i.qty}× ${i.name.split(" ").slice(0, 2).join(" ")}`).join(", ") })),
+                  ...data.repayments.filter((r) => r.customerId === deniDetail.id)
+                    .map((r) => ({ ts: r.ts, type: "credit", amount: r.amount, label: `Payment · ${payLabel[r.method]}` })),
+                ].sort((a, b) => b.ts - a.ts).map((t, i) => (
+                  <div className="sb-led" key={i}>
+                    <div><div className="l1">{t.label}</div><div className="l2">{fmtDate(t.ts)} · {relLabel(t.ts)}</div></div>
+                    <div className={"v " + t.type}>{t.type === "credit" ? "−" : "+"}{ksh(t.amount)}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="sb-eyebrow" style={{ marginTop: 0 }}>Record a payment</div>
+              <div className="sb-pay" style={{ gridTemplateColumns: "1fr 1fr" }}>
+                {["cash", "mpesa"].map((mth) => (
+                  <button key={mth} className={repayMethod === mth ? "on" : ""} onClick={() => setRepayMethod(mth)}>
+                    <PayIcon m={mth} /> {payLabel[mth]}
+                  </button>
+                ))}
+              </div>
+              <div className="sb-field"><label>Amount paid (Ksh)</label>
+                <input className="sb-input" inputMode="numeric" placeholder="0" value={repayAmt}
+                  onChange={(e) => setRepayAmt(e.target.value)} /></div>
+              <button className="sb-btn primary" onClick={recordRepayment}><Banknote size={18} /> Record payment</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
